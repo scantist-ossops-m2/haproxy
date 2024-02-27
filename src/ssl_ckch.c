@@ -4218,6 +4218,39 @@ alloc_error:
 
 REGISTER_CONFIG_SECTION("crt-store", cfg_parse_crtstore, NULL);
 
+
+int ckch_conf_cmp(struct ckch_conf *conf1, struct ckch_conf *conf2, char **err)
+{
+	int err_code = 0;
+	int i;
+	/* no conf, can leave */
+	if (conf1 == NULL && conf2 == NULL)
+		goto out;
+
+
+	for (i = 0; ckch_conf_kws[i].name != NULL; i++) {
+		char *avail1, *avail2;
+
+		if (strcmp(ckch_conf_kws[i].name, "name") == 0)
+			continue;
+		if (strcmp(ckch_conf_kws[i].name, "crt") == 0)
+			continue;
+
+		avail1 = conf1 ? *(char **)((intptr_t)conf1 + (ptrdiff_t)ckch_conf_kws[i].offset) : NULL;
+		avail2 = conf2 ? *(char **)((intptr_t)conf2 + (ptrdiff_t)ckch_conf_kws[i].offset) : NULL;
+
+		/* must alert when strcmp is wrong, or when one of the field is NULL */
+		if (((avail1 && avail2) && strcmp(avail1, avail2) != 0)
+		    || (!!avail1 ^ !!avail2)) {
+			memprintf(err, "%s- different parameter '%s' : '%s' vs '%s'\n", *err ? *err : "", ckch_conf_kws[i].name, avail1, avail2);
+			err_code |= ERR_ALERT;
+		}
+	}
+
+out:
+	return err_code;
+}
+
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_CRTSTORE, "load", crtstore_parse_load },
 	{ 0, NULL, NULL },

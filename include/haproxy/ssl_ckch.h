@@ -45,6 +45,8 @@ void ckch_store_free(struct ckch_store *store);
 void ckch_store_replace(struct ckch_store *old_ckchs, struct ckch_store *new_ckchs);
 int ckch_store_load_files(struct ckch_conf *f, struct ckch_store *c, char **err);
 
+int ckch_conf_cmp(struct ckch_conf *conf1, struct ckch_conf *conf2, char **err);
+
 /* ckch_inst functions */
 void ckch_inst_free(struct ckch_inst *inst);
 struct ckch_inst *ckch_inst_new();

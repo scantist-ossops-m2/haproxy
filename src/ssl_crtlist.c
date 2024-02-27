@@ -22,6 +22,7 @@
 
 #include <haproxy/applet.h>
 #include <haproxy/channel.h>
+#include <haproxy/cfgparse.h>
 #include <haproxy/cli.h>
 #include <haproxy/errors.h>
 #include <haproxy/sc_strm.h>
@@ -1575,3 +1576,277 @@ static struct cli_kw_list cli_kws = {{ },{
 
 INITCALL1(STG_REGISTER, cli_register_kw, &cli_kws);
 
+/*
+ *  crt-list V2
+ *  Use a format compatible with the HAProxy configuration
+ */
+static int crtlistv2_parse_use(char **args, struct crtlist *l, const char *file, int linenum, char **err)
+{
+	int i;
+	int err_code = 0;
+	int cur_arg = 0;
+	struct ckch_conf *f = NULL;
+	struct ssl_bind_conf *s = NULL;
+	struct ckch_store *c = NULL;
+	struct crtlist_entry *e = NULL;
+	char *basename = NULL; /* lookup name */
+	char *lookup_ext[] = { "", ".dsa", ".ecdsa", ".rsa", NULL };
+
+	cur_arg++; /* skip "use" */
+
+	while (*(args[cur_arg])) {
+		int found = 0;
+
+		if (strcmp("crt", args[cur_arg]) == 0) {
+			basename = args[cur_arg + 1];
+			found = 1;
+			goto found;
+		}
+
+		if (strcmp("name", args[cur_arg]) == 0) {
+			/* invalid keyword on crt-list */
+			found = 0;
+			goto found;
+		}
+
+		/* parse keywords for ckch_conf */
+		for (i = 0; ckch_conf_kws[i].name != NULL; i++) {
+			if (strcmp(ckch_conf_kws[i].name, args[cur_arg]) == 0) {
+				char **target;
+
+				if (!f)
+					f = calloc(1, sizeof(*f));
+				if (!f)
+					goto alloc_error;
+				found = 1;
+				target = (char **)((intptr_t)f + (ptrdiff_t)ckch_conf_kws[i].offset);
+				*target = strdup(args[cur_arg + 1]);
+
+				if (!*target)
+					goto alloc_error;
+				goto found;
+			}
+		}
+		/* parse ssl_bind_conf keywords */
+		for (i = 0; ssl_crtlist_kws[i].kw != NULL; i++) {
+			if (strcmp(ssl_crtlist_kws[i].kw, args[cur_arg]) == 0) {
+				found = 1;
+
+				if (!s)
+					s = calloc(1, sizeof *s);
+				if (!s)
+					goto alloc_error;
+
+				err_code |= ssl_crtlist_kws[i].parse(args, cur_arg, NULL, s, 0, err);
+				cur_arg += 1 + ssl_crtlist_kws[i].skip;
+				goto found;
+			}
+		}
+
+found:
+		if (!found) {
+			memprintf(err,"parsing [%s:%d] : '%s %s' in section 'crt-list': unknown keyword '%s'.",
+			         file, linenum, args[0], args[cur_arg],args[cur_arg]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		cur_arg += 2;
+	}
+	if (!basename) {
+		memprintf(err,"parsing [%s:%d] : '%s' in section 'crt-list': mandatory 'crt' parameter not found.",
+		         file, linenum, args[0]);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	/* TODO:
+
+	  - look for 'crt' in the ckch_store tree OK
+	    - if it exists: OK
+	      - check if the ckch_store entry has the same ckch_filename parameters  TODO
+	    - else:
+	      - look for the .ecdsa, .rsa, .dsa OK
+	      - create the ckch_store OK
+	  - add to the crtlist_entry OK
+	  - link to the crtlist_store OK
+	  - check ssl_bind_conf leak and free if unused
+
+	  XXX:
+	  - what about filters ? (stored in ssl_bind_conf ? still in crtlist_entries ?
+	*/
+
+
+	for (i = 0; lookup_ext[i] != NULL; i++) {
+		char filename[PATH_MAX] = {0};
+		int ret;
+
+		ret = snprintf(filename, sizeof(filename), "%s%s", basename, lookup_ext[i]);
+		if (ret >= sizeof(filename))
+			continue;
+
+		e = crtlist_entry_new();
+		if (!e)
+			goto alloc_error;
+
+		c = ckchs_lookup(filename);
+		if (c && f) {
+			/* if some ckch_conf parameters were specified, compare them */
+			err_code |= ckch_conf_cmp(f, c->conf, err);
+			if (err_code & ERR_ALERT) {
+				memprintf(err,"crt '%s' already declared elsewhere with incompatible parameters:\n%s", filename, *err);
+				indent_msg(err, 2);
+				err_code |= ERR_FATAL | ERR_ABORT;
+				goto out;
+			}
+		}
+
+		if (!c) {
+			struct stat st;
+
+			/* If the file in not found, try the next one from the
+			 * bundle extension */
+			if (stat(filename, &st) != 0)
+				continue;
+
+			/* the store was not found, create one */
+			c = ckch_store_new(filename);
+			if (!c)
+				goto alloc_error;
+			if (!f)
+				f = calloc(1, sizeof(*f));
+			if (!f)
+				goto alloc_error;
+
+			if (!f->crt)
+				f->crt = strdup(filename);
+			if (!f->crt)
+				goto alloc_error;
+
+			err_code |= ckch_store_load_files(f, c, err);
+			if (err_code & ERR_FATAL)
+				goto out;
+
+			BUG_ON(ebst_insert(&ckchs_tree, &c->node) != &c->node);
+		}
+
+		/* put the store it in the entry, and store the
+		entry in the crtlist */
+		e->node.key = c;
+		e->crtlist = l;
+
+		ebpt_insert(&l->entries, &e->node);
+		LIST_APPEND(&l->ord_entries, &e->by_crtlist);
+		LIST_APPEND(&c->crtlist_entry, &e->by_ckch_store);
+
+		/* if the basename was found without trying to add an
+		 * extension, leave at first iteration */
+		if (*lookup_ext[i] == '\0' && c)
+			break;
+		/* if we don't need the bundle, exit at first iteration */
+		if (!(global_ssl.extra_files & SSL_GF_BUNDLE))
+			break;
+	}
+
+	if (!c) {
+		memprintf(err,"crt '%s' could not be found on the filesystem", basename);
+		err_code |= ERR_FATAL | ERR_ALERT;
+		goto out;
+	}
+
+out:
+	l->linecount++;
+
+	/* free ckch_filenames content */
+	if (err_code & ERR_FATAL) {
+		ckch_store_free(c);
+	}
+	return err_code;
+
+
+alloc_error:
+	ha_alert("parsing [%s:%d]: out of memory.\n", file, linenum);
+	err_code |= ERR_ALERT | ERR_ABORT;
+	goto out;
+}
+
+struct crtlist_kw_list {
+	struct list list;
+	struct {
+		const char *kw;                         /* the keyword itself */
+		int (*parse)(char **args, struct crtlist *crtlist, const char *file, int linenum, char **err);
+	} kw[VAR_ARRAY];
+};
+
+static struct crtlist_kw_list crtlist_kws = {ILH, {
+	{ "use", crtlistv2_parse_use },
+	{ NULL, NULL },
+}};
+
+static int cfg_parse_crtlist(const char *file, int linenum, char **args, int kwm)
+{
+	const char *best;
+	int index;
+	int rc = 0;
+	int err_code = 0;
+	char *errmsg = NULL;
+	static struct crtlist *l = NULL;
+
+	if (strcmp(args[0], "crt-list") == 0) { /* new crt-store section */
+		if (!*args[1]) {
+			ha_alert("parsing [%s:%d] : '%s' section need a name argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		l = crtlist_new(args[1], 0);
+		if (l == NULL)
+			goto alloc_error;
+
+		if (ebst_insert(&crtlists_tree, &l->node) != &l->node) {
+			ha_alert("parsing [%s:%d] : crt-list '%s' already exists\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_ABORT;
+			free(l);
+			goto out;
+		}
+
+		goto out;
+	}
+
+	for (index = 0; crtlist_kws.kw[index].kw != NULL; index++) {
+		if (strcmp(crtlist_kws.kw[index].kw, args[0]) == 0) {
+			/* prepare error message just in case */
+			rc = crtlist_kws.kw[index].parse(args, l, file, linenum, &errmsg);
+			if (rc & ERR_ALERT) {
+				ha_alert("parsing [%s:%d] : %s\n", file, linenum, errmsg);
+				err_code |= rc;
+				goto out;
+			}
+			else if (rc & ERR_WARN) {
+				ha_warning("parsing [%s:%d] : %s\n", file, linenum, errmsg);
+				err_code |= rc;
+				goto out;
+			}
+			goto out;
+		}
+	}
+
+	best = cfg_find_best_match(args[0], &cfg_keywords.list, CFG_CRTSTORE, NULL);
+	if (best)
+		ha_alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section; did you mean '%s' maybe ?\n", file, linenum, args[0], cursection, best);
+	else
+		ha_alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
+	err_code |= ERR_ALERT | ERR_FATAL;
+	goto out;
+
+out:
+	free(errmsg);
+	return err_code;
+
+alloc_error:
+	ha_alert("parsing [%s:%d]: out of memory.\n", file, linenum);
+	err_code |= ERR_ALERT | ERR_ABORT;
+	goto out;
+
+}
+
+REGISTER_CONFIG_SECTION("crt-list", cfg_parse_crtlist, NULL);
