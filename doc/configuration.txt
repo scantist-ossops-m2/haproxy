@@ -60,6 +60,7 @@ Summary
 3.10.     Log forwarding
 3.11.     HTTPClient tuning
 3.12.     Certificate Storage
+3.13.     crt-list
 
 4.    Proxies
 4.1.      Proxy keywords matrix
@@ -4686,6 +4687,81 @@ In this example, 2 certificate definitions were done, the first one is named
 "site1" and must be used like this in the configuration, and the second one,
 which was not explicity named, will use the name of the "crt" keyword, and will
 be named "site2.crt".
+
+3.13. crt-list
+--------------
+
+crt-list are list of certificates that can be declared with TLS options. They
+were originally designed as separed files but the crt-list section allows to
+declare a crt-list directly in your haproxy configuration. Once the crt-list is
+declared it can be used on a bind line with the standard "crt-list" keyword.
+
+This documentation section describes the crt-list section which uses the
+crt-list V2 format. For the legacy crt-list V1 files see the "crt-list" keyword
+of the bind line.
+
+Currently only the "use" keyword is supported in the "crt-list" section:
+
+The crt-list keyword takes a unique <name> argument as parameter.
+
+use [crt <filename>] [param*]
+  Use a certificate with TLS options in a crt-list. The parameters are either a
+  options compatible with the bind lines or options for the "load" keyword of
+  the crt-store section.
+
+  Compatible arguments from the bind line:
+
+    - allow-0rtt
+    - alpn
+    - ca-file
+    - ca-verify-file
+    - ciphers
+    - ciphersuites
+    - client-sigalgs
+    - crl-file
+    - curves
+    - ecdhe
+    - no-alpn
+    - no-ca-names
+    - npn
+    - sigalgs
+    - ssl-min-ver
+    - ssl-max-ver
+    - verify
+
+  Refer to the bind line documentation for documentation of these keywords.
+
+  Compatible arguments from the crt-store section:
+
+    - crt
+    - key
+    - ocsp
+    - issuer
+    - sctl
+
+  The same set of these arguments should be used if the same crt argument is
+  used multiple time. Since it will declare implicitly a certificate storage,
+  you can't use the same crt with different options, even in other configuration
+  sections.
+
+  Refer to the crt-list documentation for documentation of these keywords.
+
+Example:
+
+    crt-store
+        load name "site0" crt "site0.crt" key "site0.key"
+
+    crt-list list2
+        use crt "site0"
+
+    crt-list list1
+        use crt "site1.crt"
+        use crt "site2.crt" key "site2.key" ocsp "site2.ocsp"
+        use crt "site3.crt" ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+
+    frontend in
+        bind *:443 ssl crt-list "list1" crt-list "list2"
+
 
 4. Proxies
 ----------
